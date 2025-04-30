@@ -24,6 +24,7 @@ setup(
     entry_points={
         'console_scripts': [
             'banana_detector = shrinkray_heist.banana_detector:main',
+            'safety_controller = shrinkray_heist.safety_controller:main'
         ],
     },
-) 
+)
