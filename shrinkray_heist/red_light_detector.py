@@ -15,7 +15,7 @@ import os
 ###############################################################
 
 # Set this to True to enable image display (requires GUI)
-DISPLAY_IMAGES = False
+DISPLAY_IMAGES = True
 
 def image_print(img):
 	"""
@@ -50,20 +50,33 @@ def cd_color_segmentation(img, template=None):
     # image_print(hsv_version)
 
     # Taken from https://cvexplained.wordpress.com/2020/04/28/color-detection-hsv/#:~:text=The%20HSV%20values%20for%20true,10%20and%20160%20to%20180.
-	lower1 = np.array([0, 100, 20])
+	lower1 = np.array([0, 200, 20])
 	upper1 = np.array([10, 255, 255])
-	lower2 = np.array([160,100,20])
-	upper2 = np.array([179,255,255])
-	lower_mask = cv2.inRange(hsv_version, lower1, upper1)
-	upper_mask = cv2.inRange(hsv_version, lower2, upper2)
-	full_mask = lower_mask + upper_mask
+	full_mask = cv2.inRange(hsv_version, lower1, upper1)
 
 	# image_print(orange_mask)
-	# masked_img = cv2.bitwise_and(img, img, dst=None, mask=full_mask)
+	masked_img = cv2.bitwise_and(img, img, dst=None, mask=full_mask)
 	# image_print(masked_img)
 
+	DETECTION_BOUND = 17000
+
 	contours, _ = cv2.findContours(full_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-	# image_print(cv2.drawContours(masked_img, contours, -1, (255, 0, 0), 2))
-	if contours:
-		return True
+	image_print(cv2.drawContours(masked_img, contours, -1, (255, 0, 0), 2))
+
+	for i in range(len(contours)):
+		this_contour = contours[i]
+		contour_area = cv2.contourArea(this_contour)
+		if contour_area > DETECTION_BOUND:
+			# x_coord, y_coord, width, height = cv2.boundingRect(this_contour)
+			# image_print(cv2.rectangle(masked_img, (x_coord, y_coord), (x_coord + width, y_coord + height), (0, 255, 0), 2))
+			print("Red light detected")
+			return True
+
+	print("No red light")
 	return False
+
+# img = cv2.imread("media/traffic_light.png")
+# cd_color_segmentation(img)
+
+# img = cv2.imread("media/red_light_off.png")
+# cd_color_segmentation(img)

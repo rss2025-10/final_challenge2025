@@ -8,7 +8,7 @@ from geometry_msgs.msg import PoseArray, Pose, PoseStamped
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool, Header
 from sensor_msgs.msg import Image
-from color_segmentation import cd_color_segmentation
+from shrinkray_heist.red_light_detector import cd_color_segmentation
 from ackermann_msgs.msg import AckermannDriveStamped, AckermannDrive
 
 
