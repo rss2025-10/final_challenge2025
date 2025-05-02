@@ -58,7 +58,7 @@ def cd_color_segmentation(img, template=None):
 	masked_img = cv2.bitwise_and(img, img, dst=None, mask=full_mask)
 	# image_print(masked_img)
 
-	DETECTION_BOUND = 17000
+	DETECTION_BOUND = 16000
 
 	contours, _ = cv2.findContours(full_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 	image_print(cv2.drawContours(masked_img, contours, -1, (255, 0, 0), 2))

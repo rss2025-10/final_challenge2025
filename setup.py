@@ -2,7 +2,7 @@ import os
 import glob
 from setuptools import setup, find_packages
 
-package_name = 'final_challenge2025'
+package_name = 'shrinkray_heist'
 
 setup(
     name=package_name,
