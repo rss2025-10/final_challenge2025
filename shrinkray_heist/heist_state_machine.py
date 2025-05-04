@@ -7,7 +7,7 @@ import numpy as np
 from enum import Enum, auto
 from geometry_msgs.msg import PoseArray,PoseStamped, PoseWithCovarianceStamped, Quaternion, Pose
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Bool, Header
+from std_msgs.msg import Bool, Header, Float64, String
 from sensor_msgs.msg import Image
 from shrinkray_heist.red_light_detector import cd_color_segmentation
 from vs_msgs.msg import ConeLocation, ConeLocationPixel
@@ -64,18 +64,22 @@ class HeistStateMachine(Node):
         self.current_traj = None
 
         self.declare_parameter("safety_topic", "/vesc/low_level/input/safety")
-        self.declare_parameter('odom_topic', '/odom')
+        self.declare_parameter('odom_topic', '/vesc/odom')
+        self.declare_parameter("drive_topic", "/vesc/high_level/input/nav0")
 
         self.SAFETY_TOPIC = self.get_parameter("safety_topic").get_parameter_value().string_value
         self.odom_topic = self.get_parameter('odom_topic').get_parameter_value().string_value
+        self.drive_topic = self.get_parameter('drive_topic').get_parameter_value().string_value
 
         # Subscribers
         self.create_subscription(PoseStamped, '/goal_pose', self.goal_points_callback, 10)
         self.create_subscription(PoseWithCovarianceStamped, "/initial_pose", self.initial_pose_callback, 10)
         self.create_subscription(Image, "/zed/zed_node/rgb/image_rect_color", self.image_callback, 5)
-        self.create_publisher(AckermannDriveStamped, self.SAFETY_TOPIC, 10)
+        self.stoplight_publisher = self.create_publisher(AckermannDriveStamped, self.SAFETY_TOPIC, 10)
         self.create_subscription(ConeLocationPixel, '/banana_px', self.banana_callback, 10)
         self.bridge = CvBridge() # Converts between ROS images and OpenCV Images
+        self.error_pub = self.create_publisher(Float64, "/error", 1)
+        self.create_timer(0.1, self.state_monitor)
 
 
         # Subscribe to odometry updates.
@@ -98,12 +102,16 @@ class HeistStateMachine(Node):
         """Stores initial pose."""
         self.current_pose = [msg.pose.position.x, msg.pose.position.y]
 
+    def state_monitor(self):
+        self.get_logger().info(f"{self.state.name}")
+
+
 
     def goal_points_callback(self, msg):
         """Stores goal points as they come. If a 4th point comes in, resets all points collected.
         Stores whether or not the point is an end point as well."""
 
-        position = [msg.pose.position.x, msg.pose.position.y]
+        position = [msg.pose.pose.position.x, msg.pose.pose.position.y]
 
         if len(self.goal_points) >= 3:
             self.goal_points = []
@@ -123,30 +131,40 @@ class HeistStateMachine(Node):
         if self.state == HeistState.FOLLOWING:
             self.state = HeistState.BANANA_DETECTED
             self.get_logger().info('Banana detected! Driving to banana.')
+
+
+        if self.state == HeistState.BANANA_DETECTED:
             u = msg.u
             v = msg.v
 
-            #Call to main function
+                #Call to main function
             dx, dy = self.transformUvToXy(u, v)
 
+            if np.sqrt(dx**2 + dy**2) < FINISH_RADIUS:
+                self.enter_wait_state()
 
-            alpha = math.atan2(dx, dy)
+            else:
 
-            if self.lookahead == 0:
-                    self.get_logger().error("Lookahead is 0; cannot compute steering.")
-                    return
+                alpha = math.atan2(dx, dy)
 
-                # Pure pursuit curvature formula.
-            steering_angle = math.atan2(self.wheelbase_length * math.sin(alpha), self.lookahead)
+                if self.lookahead == 0:
+                            self.get_logger().error("Lookahead is 0; cannot compute steering.")
+                            return
 
-                #self.get_logger().info(f"Target in vehicle frame: ({local_x:.2f}, {local_y:.2f}), "
-                #                       f"alpha: {alpha:.2f}, steering: {steering_angle:.2f}")
+                        # Pure pursuit curvature formula.
+                steering_angle = math.atan2(self.wheelbase_length * math.sin(alpha), self.lookahead)
 
-            self.publish_drive_command(self.speed, steering_angle)
+                        #self.get_logger().info(f"Target in vehicle frame: ({local_x:.2f}, {local_y:.2f}), "
+                        #                       f"alpha: {alpha:.2f}, steering: {steering_angle:.2f}")
+
+                self.publish_drive_command(self.speed, steering_angle)
 
 
 
     def plan_to_next_point(self):
+        """Just calls A Star planner or decides to be finished.
+        Should only be called when the car is ready to switch
+        to following mode or if it's about to finish."""
 
         if self.current_goal_idx < len(self.goal_points):
             goal = self.goal_points[self.current_goal_idx]
@@ -161,6 +179,7 @@ class HeistStateMachine(Node):
             self.state = HeistState.FINISHED
 
     def pure_pursuit(self, msg):
+        """Trajectory follower code. Makes sure car is in following mode."""
 
         if self.state is not HeistState.FOLLOWING:
             return
@@ -213,9 +232,13 @@ class HeistStateMachine(Node):
         #                       f"alpha: {alpha:.2f}, steering: {steering_angle:.2f}")
 
         self.publish_drive_command(self.speed, steering_angle)
+        error_msg = Float64()
+        error_msg.data = error
+        self.error_pub.publish(error_msg)
 
 
     def enter_wait_state(self):
+        """Waiting when banana is detected."""
 
         self.state = HeistState.WAITING
         self.get_logger().info(f'Waiting {self.wait_duration} seconds at banana.')
@@ -290,6 +313,17 @@ class HeistStateMachine(Node):
             self.get_logger().error(f"CV Bridge error: {e}")
         except Exception as e:
             self.get_logger().error(f"No cone detected: {e}")
+
+    def publish_drive_command(self, speed, steering_angle):
+        """
+        Helper function that publishes an AckermannDriveStamped command.
+        """
+        cmd = AckermannDriveStamped()
+        cmd.header.stamp = self.get_clock().now().to_msg()
+        cmd.header.frame_id = "base_link"
+        cmd.drive.speed = float(speed)
+        cmd.drive.steering_angle = float(steering_angle)
+        self.drive_pub.publish(cmd)
 
 def main(args=None):
     rclpy.init(args=args)

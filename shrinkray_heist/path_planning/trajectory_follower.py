@@ -33,6 +33,7 @@ class PurePursuit(Node):
     to generate Ackermann steering commands.
     """
     def __init__(self):
+        
         super().__init__("trajectory_follower")
 
         # Declare parameters (with defaults)
