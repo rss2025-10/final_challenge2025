@@ -1,16 +1,11 @@
-
 <?xml version="1.0"?>
 <launch>
   <!-- Launch the safety controller node -->
   <node pkg="shrinkray_heist" exec="safety_controller" name="safety_controller" output="screen">
     <param name="safety_topic" value="/vesc/low_level/input/safety"/>
   </node>
-</launch>
-<launch>
   <node pkg="shrinkray_heist" exec="banana_detector" name="banana_detector" output="screen">
   </node>
-</launch>
-<launch>
   <node pkg="shrinkray_heist" exec="state_machine" name="state_machine" output="screen">
   </node>
 </launch>

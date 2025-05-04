@@ -13,29 +13,6 @@ from vs_msgs.msg import ConeLocationPixel, ConeLocation  # Using the same messag
 # Import the YOLO detector
 from shrinkray_heist.model.detector import Detector
 
-# POINTS WERE GATHERED IN A CLOCKWISE MANNER, STARTING FROM THE TOP LEFT CORNER OF THE PAPER
-######################################################
-## DUMMY POINTS -- ENTER YOUR MEASUREMENTS HERE
-PTS_IMAGE_PLANE = [[270.0, 255.0],
-                   [436.0, 254.0],
-                   [509.0, 325.0],
-                   [244.0, 328.0]] # dummy points
-######################################################
-
-# PTS_GROUND_PLANE units are in inches
-# car looks along positive x axis with positive y axis to left
-
-######################################################
-## DUMMY POINTS -- ENTER YOUR MEASUREMENTS HERE
-PTS_GROUND_PLANE = [[22, 3.25],
-                    [22, -7.75],
-                    [13.5, -7.75],
-                    [13.5, 3.25]] # dummy points
-######################################################
-
-METERS_PER_INCH = 0.0254
-
-
 class BananaDetector(Node):
     """
     A class for applying banana detection using YOLO model to the robot.
@@ -48,10 +25,12 @@ class BananaDetector(Node):
 
         # Initialize the YOLO detector
         self.detector = Detector(threshold=0.3)
+        classes = self.detector.model.names
+        self.get_logger().info(f"Classes: {classes}")
 
         # Publishers
         self.banana_pub = self.create_publisher(ConeLocationPixel, "/banana_px", 10)
-        self.debug_pub = self.create_publisher(Image, "/banana_debug_img", 10)
+        # self.debug_pub = self.create_publisher(Image, "/banana_debug_img", 10)
 
         # Subscribe to ZED camera RGB frames
         self.image_sub = self.create_subscription(Image, "/zed/zed_node/rgb/image_rect_color", self.image_callback, 5)
@@ -59,22 +38,9 @@ class BananaDetector(Node):
 
         # Add a counter to track frames processed
         self.frame_count = 0
-        self.detection_count = 0
-
+        self.banana_detection_count = 0
+        self.traffic_light_detection_count = 0
         self.get_logger().info("Banana Detector Initialized")
-        self.get_logger().info(f"Available classes in YOLO model: {self.detector.classes}")
-
-        np_pts_ground = np.array(PTS_GROUND_PLANE)
-        np_pts_ground = np_pts_ground * METERS_PER_INCH
-        np_pts_ground = np.float32(np_pts_ground[:, np.newaxis, :])
-
-        np_pts_image = np.array(PTS_IMAGE_PLANE)
-        np_pts_image = np_pts_image * 1.0
-        np_pts_image = np.float32(np_pts_image[:, np.newaxis, :])
-
-        self.h, err = cv2.findHomography(np_pts_image, np_pts_ground)
-
-        self.get_logger().info("Homography Transformer Initialized")
 
     def image_callback(self, image_msg):
         """
@@ -88,79 +54,78 @@ class BananaDetector(Node):
             # Convert ROS Image message to OpenCV image
             image = self.bridge.imgmsg_to_cv2(image_msg, "bgr8")
 
-            # Log frame processing
-            if self.frame_count % 10 == 0:
-                self.get_logger().info(f"Processing frame #{self.frame_count}, image shape: {image.shape}")
-
             # Run YOLO detection
             results = self.detector.predict(image)
             predictions = results["predictions"]
 
             # If no predictions at all, return early
             if not predictions:
-                if self.frame_count % 30 == 0:
-                    self.get_logger().info("No objects detected in this frame")
                 return
 
-            # Log all detected objects for debugging
-            detected_classes = [pred[1] for pred in predictions]
-            if detected_classes:
-                self.get_logger().info(f"Detected objects: {detected_classes}")
-
+            #---------------------------------------------------------------------------------------
             # Filter predictions to only include bananas
             banana_predictions = [pred for pred in predictions if pred[1] == "banana"]
 
-            if not banana_predictions:
-                if self.frame_count % 30 == 0:
-                    self.get_logger().info("No bananas detected in this frame")
-                return
+            if banana_predictions:
+                # Increment detection counter and log
+                self.banana_detection_count += 1
 
-            # Increment detection counter and log
-            self.detection_count += 1
+                # Get the first banana detection
+                (xmin, ymin, xmax, ymax), _ = banana_predictions[0]
 
-            # Get the first banana detection
-            (xmin, ymin, xmax, ymax), _ = banana_predictions[0]
+                # Calculate the center pixel at the bottom of the bounding box
+                # This is the point that corresponds to the ground plane
+                u = (xmin + xmax) / 2  # center x-coordinate
+                v = float(ymax)  # bottom y-coordinate
 
-            # Calculate the center pixel at the bottom of the bounding box
-            # This is the point that corresponds to the ground plane
-            u = (xmin + xmax) / 2  # center x-coordinate
-            v = float(ymax)  # bottom y-coordinate
+                # Log banana detection with coordinates
+                self.get_logger().info(f"BANANA DETECTED #{self.banana_detection_count}")
+                self.get_logger().info(f"Bounding box: ({int(xmin)}, {int(ymin)}) to ({int(xmax)}, {int(ymax)})")
+                self.get_logger().info(f"Ground point: u={int(u)}, v={int(v)}")
 
-            # Log banana detection with coordinates
-            self.get_logger().info(f"BANANA DETECTED #{self.detection_count}")
-            self.get_logger().info(f"Bounding box: ({int(xmin)}, {int(ymin)}) to ({int(xmax)}, {int(ymax)})")
-            self.get_logger().info(f"Ground point: u={int(u)}, v={int(v)}")
+                # Create and publish the banana location message
+                banana_msg = ConeLocationPixel()
+                banana_msg.u = u
+                banana_msg.v = v
+                self.banana_pub.publish(banana_msg)
+            #---------------------------------------------------------------------------------------
+            # Check for traffic light
+            traffic_light_predictions = [pred for pred in predictions if pred[1] == "traffic light"]
+            
+            if traffic_light_predictions:
+                # Increment detection counter and log
+                self.traffic_light_detection_count += 1
 
-            # ######## HOMOGRAPHY TRANSFORM HERE
+                # Get the first traffic light detection
+                (xmin, ymin, xmax, ymax), _ = traffic_light_predictions[0]
 
-            # Create and publish the banana location message
-            banana_msg = ConeLocationPixel()
-            banana_msg.u = u
-            banana_msg.v = v
-            self.banana_pub.publish(banana_msg)
+                # Log traffic light detection with coordinates
+                self.get_logger().info(f"TRAFFIC LIGHT DETECTED #{self.traffic_light_detection_count}")
+                self.get_logger().info(f"Bounding box: ({int(xmin)}, {int(ymin)}) to ({int(xmax)}, {int(ymax)})")
+                
+            
+            #---------------------------------------------------------------------------------------
+            
 
-            # Create debug image with bounding box and detection point
-            debug_img = image.copy()
+            # # Create debug image with bounding box and detection point
+            # debug_img = image.copy()
 
-            # Draw the bounding box and bottom center point on the debug image
-            cv2.rectangle(debug_img, (int(xmin), int(ymin)), (int(xmax), int(ymax)), (0, 255, 0), 2)
-            cv2.circle(debug_img, (int(u), int(v)), 5, (0, 0, 255), -1)
+            # # Draw the bounding box and bottom center point on the debug image
+            # cv2.rectangle(debug_img, (int(xmin), int(ymin)), (int(xmax), int(ymax)), (0, 255, 0), 2)
+            # cv2.circle(debug_img, (int(u), int(v)), 5, (0, 0, 255), -1)
 
-            # Add text label
-            cv2.putText(debug_img, "banana", (int(xmin), int(ymin) - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+            # # Add text label
+            # cv2.putText(debug_img, "banana", (int(xmin), int(ymin) - 10),
+            #             cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
 
-            # Publish the debug image
-            debug_msg = self.bridge.cv2_to_imgmsg(debug_img, "bgr8")
-            self.debug_pub.publish(debug_msg)
+            # # Publish the debug image
+            # debug_msg = self.bridge.cv2_to_imgmsg(debug_img, "bgr8")
+            # self.debug_pub.publish(debug_msg)
 
         except CvBridgeError as e:
             self.get_logger().error(f"CV Bridge error: {e}")
         except Exception as e:
             self.get_logger().error(f"Error processing image: {e}")
-
-
-
 
 
 def main(args=None):

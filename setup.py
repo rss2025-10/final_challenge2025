@@ -13,6 +13,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', glob.glob(os.path.join('shrinkray_heist/launch', '*launch.py'))),
+        ('share/' + package_name + '/launch', glob.glob(os.path.join('shrinkray_heist/launch', '*launch.xml')))
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -25,7 +26,7 @@ setup(
         'console_scripts': [
             'banana_detector = shrinkray_heist.banana_detector:main',
             'safety_controller = shrinkray_heist.safety_controller:main',
-            "state_machine = shrinkray_hest.heist_state_machine:main"
+            "state_machine = shrinkray_heist.heist_state_machine:main"
         ],
     },
 )

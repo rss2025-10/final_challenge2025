@@ -6,13 +6,14 @@ from cv_bridge import CvBridge, CvBridgeError
 import numpy as np
 from enum import Enum, auto
 from geometry_msgs.msg import PoseArray,PoseStamped, PoseWithCovarianceStamped, Quaternion, Pose
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, OccupancyGrid
 from std_msgs.msg import Bool, Header, Float64, String
 from sensor_msgs.msg import Image
 from shrinkray_heist.red_light_detector import cd_color_segmentation
 from vs_msgs.msg import ConeLocation, ConeLocationPixel
 from ackermann_msgs.msg import AckermannDriveStamped, AckermannDrive
 from path_planning.hybrid_a_star import HybridAStarPlanner
+import os
 
 
 # TODO: Import banana detection message type
@@ -28,7 +29,7 @@ class HeistState(Enum):
 
 FINISH_RADIUS = 1.0       # meters; when within this radius of the final waypoint, finish (stop)
 LOOKAHEAD_DISTANCE = 0.75   # meters; the lookahead distance for pure pursuit
-CAR_LENGTH = 0.325         # meters; your vehicle’s wheelbase length
+CAR_LENGTH = 0.325         # meters; your vehicle's wheelbase length
 SPEED = 1.0
 
 def quaternion_to_yaw(q: Quaternion):
@@ -54,6 +55,7 @@ class HeistStateMachine(Node):
             xy_resolution=0.5,
             yaw_resolution=math.radians(30)
         )
+        self.create_subscription(OccupancyGrid, "/map", self.map_cb, 1)
 
         self.state = HeistState.IDLE
         self.goal_points = []
@@ -65,7 +67,7 @@ class HeistStateMachine(Node):
 
         self.declare_parameter("safety_topic", "/vesc/low_level/input/safety")
         self.declare_parameter('odom_topic', '/vesc/odom')
-        self.declare_parameter("drive_topic", "/vesc/high_level/input/nav0")
+        self.declare_parameter("drive_topic", "/vesc/input/navigation")
 
         self.SAFETY_TOPIC = self.get_parameter("safety_topic").get_parameter_value().string_value
         self.odom_topic = self.get_parameter('odom_topic').get_parameter_value().string_value
@@ -73,7 +75,8 @@ class HeistStateMachine(Node):
 
         # Subscribers
         self.create_subscription(PoseStamped, '/goal_pose', self.goal_points_callback, 10)
-        self.create_subscription(PoseWithCovarianceStamped, "/initial_pose", self.initial_pose_callback, 10)
+        self.create_subscription(PoseArray, '/shrinkray_part', self.shrinkray_points_callback, 10)
+        self.create_subscription(PoseWithCovarianceStamped, "/initialpose", self.initial_pose_callback, 10)
         self.create_subscription(Image, "/zed/zed_node/rgb/image_rect_color", self.image_callback, 5)
         self.stoplight_publisher = self.create_publisher(AckermannDriveStamped, self.SAFETY_TOPIC, 10)
         self.create_subscription(ConeLocationPixel, '/banana_px', self.banana_callback, 10)
@@ -86,7 +89,7 @@ class HeistStateMachine(Node):
         self.odom_sub = self.create_subscription(
             Odometry,
             self.odom_topic,
-            self.pose_callback,
+            self.pure_pursuit,
             1)
 
         # Create a publisher for drive commands.
@@ -95,23 +98,86 @@ class HeistStateMachine(Node):
         # Timers (for WAITING state)
         self.wait_timer = None
         self.wait_duration = 5.0  # seconds to wait at banana
+        
+        # Homography transform
+        ######################################################
+        ## DUMMY POINTS -- ENTER YOUR MEASUREMENTS HERE
+        PTS_IMAGE_PLANE = [[270.0, 255.0],
+                        [436.0, 254.0],
+                        [509.0, 325.0],
+                        [244.0, 328.0]] # dummy points
+        ######################################################
+
+        # PTS_GROUND_PLANE units are in inches
+        # car looks along positive x axis with positive y axis to left
+
+        ######################################################
+        ## DUMMY POINTS -- ENTER YOUR MEASUREMENTS HERE
+        PTS_GROUND_PLANE = [[22, 3.25],
+                            [22, -7.75],
+                            [13.5, -7.75],
+                            [13.5, 3.25]] # dummy points
+        ######################################################
+
+        METERS_PER_INCH = 0.0254
+        
+        np_pts_ground = np.array(PTS_GROUND_PLANE)
+        np_pts_ground = np_pts_ground * METERS_PER_INCH
+        np_pts_ground = np.float32(np_pts_ground[:, np.newaxis, :])
+
+        np_pts_image = np.array(PTS_IMAGE_PLANE)
+        np_pts_image = np_pts_image * 1.0
+        np_pts_image = np.float32(np_pts_image[:, np.newaxis, :])
+
+        self.h, err = cv2.findHomography(np_pts_image, np_pts_ground)
 
         self.get_logger().info('Heist State Machine Initialized')
 
     def initial_pose_callback(self, msg):
         """Stores initial pose."""
-        self.current_pose = [msg.pose.position.x, msg.pose.position.y]
+        self.get_logger().info("Initial pose stored")
+        self.current_pose = [msg.pose.pose.position.x, msg.pose.pose.position.y, quaternion_to_yaw(msg.pose.pose.orientation)]
 
     def state_monitor(self):
-        self.get_logger().info(f"{self.state.name}")
+        #self.get_logger().info(f"{self.state.name}")
+        pass
 
+    def map_cb(self, msg):
+        self.get_logger().info("Map recieved. Setting up occupancy grid for planner")
+        self.a_star_planner.set_occupancy_grid(msg)
+        self.resolution = msg.info.resolution
 
+    def shrinkray_points_callback(self, msg):
+        """Process points from BasementPointPublisher for shrinkray part locations"""
+        self.get_logger().info("Received shrinkray part locations")
+
+        # Reset current state before planning to new points
+        self.goal_points = []
+        self.current_goal_idx = 0
+
+        # Extract the points and add them to the goal points
+        for pose in msg.poses:
+            position = [pose.position.x, pose.position.y, 0.0]  # Setting yaw to 0 since orientation doesn't matter for these waypoints
+            self.goal_points.append(position)
+            self.get_logger().info(f"Added goal point: {position[0]:.2f}, {position[1]:.2f}")
+
+        # Add the starting position as the final goal to return to
+        if self.current_pose is not None:
+            self.goal_points.append([self.current_pose[0], self.current_pose[1], self.current_pose[2]])
+            self.get_logger().info(f"Added return point: {self.current_pose[0]:.2f}, {self.current_pose[1]:.2f}")
+
+        # If we have goals and a valid pose, start planning
+        if self.goal_points and self.current_pose is not None:
+            self.state = HeistState.PLANNING
+            self.plan_to_next_point()
+        else:
+            self.get_logger().warn("Waiting for initial pose before planning can begin")
 
     def goal_points_callback(self, msg):
         """Stores goal points as they come. If a 4th point comes in, resets all points collected.
         Stores whether or not the point is an end point as well."""
 
-        position = [msg.pose.pose.position.x, msg.pose.pose.position.y]
+        position = [msg.pose.position.x, msg.pose.position.y, quaternion_to_yaw(msg.pose.orientation)]
 
         if len(self.goal_points) >= 3:
             self.goal_points = []
@@ -145,7 +211,7 @@ class HeistStateMachine(Node):
 
             else:
 
-                alpha = math.atan2(dx, dy)
+                alpha = math.atan2(dy, dx)
 
                 if self.lookahead == 0:
                             self.get_logger().error("Lookahead is 0; cannot compute steering.")
@@ -159,7 +225,26 @@ class HeistStateMachine(Node):
 
                 self.publish_drive_command(self.speed, steering_angle)
 
+    def transformUvToXy(self, u, v):
+        """
+        u and v are pixel coordinates.
+        The top left pixel is the origin, u axis increases to right, and v axis
+        increases down.
 
+        Returns a normal non-np 1x2 matrix of xy displacement vector from the
+        camera to the point on the ground plane.
+        Camera points along positive x axis and y axis increases to the left of
+        the camera.
+
+        Units are in meters.
+        """
+        homogeneous_point = np.array([[u], [v], [1]])
+        xy = np.dot(self.h, homogeneous_point)
+        scaling_factor = 1.0 / xy[2, 0]
+        homogeneous_xy = xy * scaling_factor
+        x = homogeneous_xy[0, 0]
+        y = homogeneous_xy[1, 0]
+        return x, y
 
     def plan_to_next_point(self):
         """Just calls A Star planner or decides to be finished.
@@ -184,8 +269,10 @@ class HeistStateMachine(Node):
         if self.state is not HeistState.FOLLOWING:
             return
 
+        #self.get_logger().info("Pursuing")
+
         # Get the vehicle pose from odometry.
-        self.current_pose = [msg.pose.pose.position.x, msg.pose.pose.position.y]
+        self.current_pose = [msg.pose.pose.position.x, msg.pose.pose.position.y, quaternion_to_yaw(msg.pose.pose.orientation)]
         vehicle_position = msg.pose.pose.position
         vehicle_orientation = msg.pose.pose.orientation
         vehicle_yaw = quaternion_to_yaw(vehicle_orientation)
@@ -197,10 +284,11 @@ class HeistStateMachine(Node):
                                             end_point[1] - vehicle_position.y)
 
                 if distance_to_end < FINISH_RADIUS:
-                    #self.get_logger().info(f"Reached end of trajectory (within {FINISH_RADIUS} m). Stopping.")
+                    self.get_logger().info(f"Reached end of trajectory (within {FINISH_RADIUS} m). Stopping.")
                     self.publish_drive_command(0.0, 0.0)
                     self.stopped = True
-                    return
+                    self.current_goal_idx += 1
+                    self.plan_to_next_point()
 
         # Get the target point (as a Pose) that is at least lookahead distance ahead.
         target_point = self.find_path_target_point(vehicle_position)
@@ -218,7 +306,7 @@ class HeistStateMachine(Node):
         local_y = math.sin(-vehicle_yaw) * dx + math.cos(-vehicle_yaw) * dy
         error = np.abs(local_y)
 
-        # Compute the angle to the target point relative to the vehicle’s x-axis.
+        # Compute the angle to the target point relative to the vehicle's x-axis.
         alpha = math.atan2(local_y, local_x)
 
         if self.lookahead == 0:
@@ -231,6 +319,7 @@ class HeistStateMachine(Node):
         #self.get_logger().info(f"Target in vehicle frame: ({local_x:.2f}, {local_y:.2f}), "
         #                       f"alpha: {alpha:.2f}, steering: {steering_angle:.2f}")
 
+        #self.get_logger().info("publishing drive command")
         self.publish_drive_command(self.speed, steering_angle)
         error_msg = Float64()
         error_msg.data = error
@@ -293,6 +382,14 @@ class HeistStateMachine(Node):
 
     def image_callback(self, image_msg):
         try:
+            # Set OpenCV to not use GUI elements
+            cv2.setUseOptimized(True)
+            cv2.ocl.setUseOpenCL(False)
+            
+            # Disable any GUI functionality
+            os.environ["OPENCV_VIDEOIO_PRIORITY_BACKEND"] = "0"
+            os.environ["OPENCV_VIDEOIO_DEBUG"] = "0"
+            
             # Convert ROS Image message to OpenCV image
             image = self.bridge.imgmsg_to_cv2(image_msg, "bgr8")
 
