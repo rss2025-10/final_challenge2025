@@ -4,5 +4,7 @@
   <!-- Launch the safety controller node -->
   <node pkg="final_challenge2025" exec="safety_controller" name="safety_controller" output="screen">
     <param name="safety_topic" value="/vesc/low_level/input/safety"/>
+    <param name="scan_topic" value="/scan"/>
+    <param name="module" value="shrinkray_heist"/>
   </node>
 </launch>
